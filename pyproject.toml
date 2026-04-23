@@ -1,0 +1,41 @@
+[project]
+name = "cleanrl-style"
+version = "0.1.0"
+description = "CleanRL-style single-file deep RL on macOS"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # Core
+    "torch>=2.5.0",
+    "numpy>=1.26,<2.2",       # gymnasium 1.x doesn't love numpy 2.2+ yet
+    "gymnasium[classic-control,box2d,mujoco]>=1.0.0",
+
+    # CLI parsing — CleanRL uses tyro, which is excellent and functional
+    "tyro>=0.8.0",
+
+    # Logging
+    "tensorboard>=2.18",
+    "wandb>=0.18",            # optional but worth having
+
+    # Video capture for env rollouts
+    "moviepy>=1.0.3",
+    "imageio>=2.34",
+
+    # Misc
+    "rich>=13.0",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.0",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "ruff>=0.6",
+    "pytest>=8.0",
+]
+
+# Optional extras you can pull in later
+[project.optional-dependencies]
+jax = ["jax>=0.4.30", "jaxlib>=0.4.30", "flax>=0.9", "optax>=0.2", "chex>=0.1.86"]
+atari = ["ale-py>=0.10", "opencv-python>=4.10", "autorom[accept-rom-license]>=0.6"]
+lightning = ["lightning>=2.4", "litdata>=0.2"]
