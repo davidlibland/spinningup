@@ -6,7 +6,6 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-export PYTHONPATH=".:${PYTHONPATH:-}"
 
 SEEDS=(1 2 3 4 5)
 TOTAL_TIMESTEPS=500000

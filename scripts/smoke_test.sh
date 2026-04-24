@@ -4,7 +4,6 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-export PYTHONPATH="${PYTHONPATH:-}:."
 
 run() {
     local name="$1"

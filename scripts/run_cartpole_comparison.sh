@@ -5,7 +5,6 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-export PYTHONPATH="${PYTHONPATH:-}:."
 
 ALGOS=(ppo dqn c51 pqn)
 SEEDS=(1 2 3 4 5)

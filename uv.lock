@@ -339,7 +339,7 @@ wheels = [
 [[package]]
 name = "cleanrl-style"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "einops" },
     { name = "gymnasium", extra = ["box2d", "classic-control", "mujoco"] },
