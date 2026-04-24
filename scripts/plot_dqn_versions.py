@@ -25,6 +25,7 @@ SERIES = [
     ("dqn_alt_v1",  "dqn_alt (before fixes)",              "#d62728", {1}),
     ("dqn_alt",     "dqn_alt (learning_starts + eps fix)", "#17becf", {1, 2}),
     ("dqn_alt_v3",  "dqn_alt (+ exploration_fraction=0.5)", "#2ca02c", {1, 2}),
+    ("dqn_alt_v4",  "dqn_alt (+ train_frequency=10, lr=2.5e-4)", "#9467bd", {1, 2}),
 ]
 
 RUN_RE = re.compile(r"^(.+?)__(.+?)__(\d+)__\d+$")

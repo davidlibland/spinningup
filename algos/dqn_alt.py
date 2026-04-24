@@ -36,7 +36,7 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 500000
     """total timesteps of the experiments"""
-    learning_rate: float = 1e-3
+    learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
@@ -58,6 +58,8 @@ class Args:
     """timestep to start learning"""
     exploration_fraction: float = 0.5
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
+    train_frequency: int = 10
+    """the number of env steps between gradient updates"""
 
 
 def make_env(env_id, idx, capture_video, run_name):
@@ -198,6 +200,10 @@ if __name__ == "__main__":
                 print(f"global_step={global_step}, episodic_return={ret:.2f}")
                 writer.add_scalar("charts/episodic_return", ret, global_step)
                 writer.add_scalar("charts/episodic_length", length, global_step)
+
+        # Only take a gradient step every `train_frequency` env steps
+        if update % args.train_frequency != 0:
+            continue
 
         # Sample a batch of experiences from the replay buffer
         b_obs, b_actions, b_next_obs, b_dones, b_rewards = rb.sample(args.batch_size)
