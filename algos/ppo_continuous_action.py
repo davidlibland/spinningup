@@ -1,4 +1,5 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import math
 import os
 import random
 import time
@@ -75,6 +76,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    noise_halflife: float | None = None
+    """The half life for autocorrelated noise"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -122,7 +125,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, noise_halflife=None):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(
@@ -147,22 +150,38 @@ class Agent(nn.Module):
         self.actor_logstd = nn.Parameter(
             torch.zeros(1, np.prod(envs.single_action_space.shape))
         )
+        if noise_halflife is not None and noise_halflife > 0:
+            self.alpha = 0.5 ** (1 / noise_halflife)
+        else:
+            self.alpha = None
 
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, x, action=None, lastnoise=None):
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
+        noise = None
+
         if action is None:
-            action = probs.sample()
+            if self.alpha:
+                if lastnoise is None:
+                    noise = torch.randn_like(action_mean)
+                else:
+                    noise = lastnoise * self.alpha + math.sqrt(
+                        1 - self.alpha**2
+                    ) * torch.randn_like(action_mean)
+                action = action_mean + action_std * noise
+            else:
+                action = probs.sample()
         return (
             action,
             probs.log_prob(action).sum(1),
             probs.entropy().sum(1),
             self.critic(x),
+            noise,
         )
 
 
@@ -211,7 +230,7 @@ if __name__ == "__main__":
         "only continuous action space is supported"
     )
 
-    agent = Agent(envs).to(device)
+    agent = Agent(envs, noise_halflife=args.noise_halflife).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -232,6 +251,7 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+    noise = None
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -247,7 +267,9 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value, noise = agent.get_action_and_value(
+                    next_obs, lastnoise=noise
+                )
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -312,7 +334,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
                     b_obs[mb_inds], b_actions[mb_inds]
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
