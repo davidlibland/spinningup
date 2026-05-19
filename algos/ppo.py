@@ -1,7 +1,9 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy
+import json
 import os
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -71,6 +73,9 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    optuna_report_path: str = None
+    """if set, append JSONL lines `{"global_step": s, "return": r}` once per
+    iteration so an Optuna driver can score/prune the run"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -200,6 +205,12 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    recent_returns: deque[float] = deque(maxlen=100)
+    optuna_fh = None
+    if args.optuna_report_path:
+        os.makedirs(os.path.dirname(args.optuna_report_path) or ".", exist_ok=True)
+        optuna_fh = open(args.optuna_report_path, "a", buffering=1)
+
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -241,6 +252,7 @@ if __name__ == "__main__":
                     print(f"global_step={global_step}, episodic_return={r:.2f}")
                     writer.add_scalar("charts/episodic_return", r, global_step)
                     writer.add_scalar("charts/episodic_length", l, global_step)
+                    recent_returns.append(float(r))
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -351,6 +363,16 @@ if __name__ == "__main__":
         writer.add_scalar(
             "charts/SPS", int(global_step / (time.time() - start_time)), global_step
         )
+
+        if optuna_fh is not None and recent_returns:
+            optuna_fh.write(json.dumps({
+                "global_step": int(global_step),
+                "return": float(np.mean(recent_returns)),
+                "n_recent": len(recent_returns),
+            }) + "\n")
+
+    if optuna_fh is not None:
+        optuna_fh.close()
 
     if args.capture_test_video:
         test_env = gym.make(args.env_id, render_mode="rgb_array")

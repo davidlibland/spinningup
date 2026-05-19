@@ -14,3 +14,9 @@ videos/
 old_runs/
 .claude/
 .vscode/
+
+runs/
+videos/
+*.jsonl
+*.log
+*.db

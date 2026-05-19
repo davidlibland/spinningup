@@ -1,4 +1,9 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+# PPO for continuous control with generalized State-Dependent Exploration (gSDE).
+# gSDE follows Raffin et al. 2021 / the Stable-Baselines3
+# StateDependentNoiseDistribution: exploration noise is a linear map of the
+# (detached) policy latent through a random matrix resampled every
+# `sde_sample_freq` steps, so exploration is smooth in state and time.
+# Base PPO derived from cleanrl ppo_continuous_action.py.
 import math
 import copy
 import json
@@ -83,14 +88,33 @@ class Args:
     """the target KL divergence threshold"""
     noise_halflife: float | None = None
     """The half life for autocorrelated noise"""
+    use_sde: bool = False
+    """if toggled, use generalized State-Dependent Exploration (gSDE) instead of
+    i.i.d. (or AR-correlated) action noise"""
+    sde_sample_freq: int = -1
+    """resample the gSDE exploration matrix every this many env steps
+    (<=0 means resample once per rollout, matching SB3's reset_noise cadence)"""
+    sde_log_std_init: float = 0.0
+    """initial value of the gSDE log-std parameter. Matches SB3's
+    ActorCriticPolicy default (the SB3-zoo Pendulum config does not override
+    it). Empirically, a smaller init (e.g. -2.0) starves exploration here and
+    the policy collapses before it learns."""
+    sde_learn_features: bool = False
+    """gSDE: if False (SB3 default) the latent feeding the exploration
+    noise/variance is detached; True couples it to the policy gradient
+    (the original naive implementation)"""
+    bootstrap_truncation: bool = True
+    """if True (SB3-faithful) add gamma*V(terminal_obs) to the reward on
+    TimeLimit truncation; if False the cleanrl behavior (truncation treated
+    as terminal) is used"""
     normalize: bool = True
     """if toggled, apply the MuJoCo-style wrapper stack (NormalizeObservation
     + obs clip + NormalizeReward + reward clip). Default True preserves the
-    cleanrl behavior; --no-normalize disables it (the SB3-zoo Pendulum setup
-    runs with normalize=False; ablation showed it is harmful there)"""
-    eval_episodes: int = 0
-    """if > 0, after training evaluate the DETERMINISTIC policy (action =
-    mean, no exploration noise) over this many episodes and print DET_EVAL"""
+    cleanrl behavior; --no-normalize disables it (matches the SB3-zoo Pendulum
+    setup, which runs with normalize=False)"""
+    eval_episodes: int = 20
+    """after training, evaluate the DETERMINISTIC policy (action = mean, no
+    exploration noise) over this many episodes — the metric SB3 reports"""
     optuna_report_path: str = None
     """if set, append JSONL lines `{"global_step": s, "return": r}` once per
     iteration so an Optuna driver can score/prune the run"""
@@ -114,7 +138,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, normalize=True):
         env = gym.wrappers.FlattenObservation(
             env
         )  # deal with dm_control's Dict observation space
-        # RecordEpisodeStatistics stays inside any reward normalization so the
+        # RecordEpisodeStatistics is kept inside any reward normalization so the
         # logged episodic_return is always the raw environment return.
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
@@ -145,42 +169,111 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+# gSDE numerical floor on the induced variance (SB3's StateDependentNoise eps).
+SDE_EPSILON = 1e-6
+
+
 class Agent(nn.Module):
-    def __init__(self, envs, noise_halflife=None):
+    def __init__(self, envs, noise_halflife=None, use_sde=False,
+                 sde_log_std_init=0.0, learn_features=False):
         super().__init__()
+        obs_dim = int(np.array(envs.single_observation_space.shape).prod())
+        act_dim = int(np.prod(envs.single_action_space.shape))
         self.critic = nn.Sequential(
-            layer_init(
-                nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)
-            ),
+            layer_init(nn.Linear(obs_dim, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(
-                nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)
-            ),
+        # Split actor into a feature trunk + linear mean head so gSDE can use
+        # the policy latent features. `actor_mean(x)` keeps the old API.
+        self.actor_trunk = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
-            layer_init(
-                nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01
-            ),
         )
-        self.actor_logstd = nn.Parameter(
-            torch.zeros(1, np.prod(envs.single_action_space.shape))
-        )
+        self.actor_head = layer_init(nn.Linear(64, act_dim), std=0.01)
+        # Used by the vanilla / AR(1) paths only.
+        self.actor_logstd = nn.Parameter(torch.zeros(1, act_dim))
+
+        # AR(1)-correlated exploration noise (mutually exclusive with gSDE).
         if noise_halflife is not None and noise_halflife > 0:
             self.alpha = 0.5 ** (1 / noise_halflife)
         else:
             self.alpha = None
 
+        # gSDE (Raffin et al. 2021 / SB3 StateDependentNoiseDistribution).
+        self.use_sde = bool(use_sde)
+        # SB3 default learn_features=False: features feeding the gSDE
+        # noise/variance are detached so the trunk is trained only by the
+        # mean's gradient. True couples them (the original naive bug).
+        self.learn_features = bool(learn_features)
+        self._n_features = 64
+        self._act_dim = act_dim
+        if self.use_sde:
+            # full_std=True -> one log-std per (feature, action) pair.
+            self.sde_log_std = nn.Parameter(
+                torch.ones(self._n_features, act_dim) * sde_log_std_init
+            )
+            self.exploration_mat = None        # (n_features, act_dim)
+            self.exploration_matrices = None   # (batch, n_features, act_dim)
+            self.sample_sde_weights(1, self.sde_log_std.device)
+
+    # --- gSDE helpers (mirrors SB3 StateDependentNoiseDistribution) ---
+    def get_sde_std(self):
+        # use_expln=False branch: std = exp(log_std).
+        return torch.exp(self.sde_log_std)
+
+    def sample_sde_weights(self, batch_size, device):
+        """Resample the gSDE exploration matrices from N(0, std)."""
+        std = self.get_sde_std()
+        dist = Normal(torch.zeros_like(std), std)
+        self.exploration_mat = dist.rsample().to(device)
+        self.exploration_matrices = dist.rsample((batch_size,)).to(device)
+
+    def _sde_noise(self, latent_sde):
+        # SB3 get_noise: per-env exploration matrices when shapes line up,
+        # otherwise fall back to the shared exploration matrix.
+        if (
+            self.exploration_matrices is None
+            or len(latent_sde) == 1
+            or len(latent_sde) != len(self.exploration_matrices)
+        ):
+            return latent_sde @ self.exploration_mat
+        noise = torch.bmm(latent_sde.unsqueeze(1), self.exploration_matrices)
+        return noise.squeeze(1)
+
+    def actor_mean(self, x):
+        return self.actor_head(self.actor_trunk(x))
+
     def get_value(self, x):
         return self.critic(x)
 
     def get_action_and_value(self, x, action=None, lastnoise=None):
-        action_mean = self.actor_mean(x)
+        latent = self.actor_trunk(x)
+        action_mean = self.actor_head(latent)
+
+        if self.use_sde:
+            # learn_features=False (SB3 default): detach so the trunk is
+            # trained only by the mean; exploration adapts via sde_log_std.
+            latent_sde = latent if self.learn_features else latent.detach()
+            std = self.get_sde_std()
+            variance = (latent_sde**2) @ (std**2)
+            action_std = torch.sqrt(variance + SDE_EPSILON)
+            probs = Normal(action_mean, action_std)
+            if action is None:
+                action = action_mean + self._sde_noise(latent_sde)
+            return (
+                action,
+                probs.log_prob(action).sum(1),
+                probs.entropy().sum(1),
+                self.critic(x),
+                None,
+            )
+
+        # Vanilla i.i.d. Gaussian, optionally AR(1)-correlated.
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -211,7 +304,6 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    print(f"running with: {args.num_iterations} iterations, {args.minibatch_size} minibatch_size, {args.batch_size} batch_size.")
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -226,13 +318,10 @@ if __name__ == "__main__":
             save_code=True,
         )
     writer = SummaryWriter(f"runs/{run_name}")
-    hyperparms_text = (
-        "|param|value|\n|-|-|\n%s"
-        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()]))
-    )
-    print(hyperparms_text)
     writer.add_text(
-        "hyperparameters", hyperparms_text,
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # TRY NOT TO MODIFY: seeding
@@ -256,7 +345,13 @@ if __name__ == "__main__":
         "only continuous action space is supported"
     )
 
-    agent = Agent(envs, noise_halflife=args.noise_halflife).to(device)
+    agent = Agent(
+        envs,
+        noise_halflife=args.noise_halflife,
+        use_sde=args.use_sde,
+        sde_log_std_init=args.sde_log_std_init,
+        learn_features=args.sde_learn_features,
+    ).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -292,7 +387,19 @@ if __name__ == "__main__":
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        # gSDE: SB3 resets the exploration matrices at the start of every
+        # rollout, and additionally every `sde_sample_freq` steps if > 0.
+        if args.use_sde:
+            agent.sample_sde_weights(args.num_envs, device)
+
         for step in range(0, args.num_steps):
+            if (
+                args.use_sde
+                and args.sde_sample_freq > 0
+                and step > 0
+                and step % args.sde_sample_freq == 0
+            ):
+                agent.sample_sde_weights(args.num_envs, device)
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
@@ -312,6 +419,32 @@ if __name__ == "__main__":
             )
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
+
+            # SB3-faithful timeout bootstrapping: for envs that ended via
+            # TimeLimit truncation (not true termination), add
+            # gamma * V(terminal_obs) so a fixed-horizon cutoff is not
+            # treated as the end of the world. Pendulum *always* truncates
+            # at 200 steps, so without this every episode's value targets
+            # are systematically biased.
+            if args.bootstrap_truncation and "final_obs" in infos:
+                boot = (
+                    np.asarray(infos["_final_obs"], dtype=bool)
+                    & np.asarray(truncations, dtype=bool)
+                    & ~np.asarray(terminations, dtype=bool)
+                )
+                if boot.any():
+                    idxs = np.nonzero(boot)[0]
+                    term_obs = np.stack(
+                        [np.asarray(infos["final_obs"][i], dtype=np.float32)
+                         for i in idxs]
+                    )
+                    with torch.no_grad():
+                        tv = agent.get_value(
+                            torch.tensor(term_obs, device=device)
+                        ).reshape(-1)
+                    idx_t = torch.as_tensor(idxs, device=device)
+                    rewards[step, idx_t] += args.gamma * tv
+
             next_obs, next_done = (
                 torch.Tensor(next_obs).to(device),
                 torch.Tensor(next_done).to(device),
@@ -450,9 +583,9 @@ if __name__ == "__main__":
     if optuna_fh is not None:
         optuna_fh.close()
 
-    # Deterministic evaluation (action = policy mean, no exploration noise).
-    # Same obs-side wrappers as training; if normalizing, reuse the trained
-    # obs statistics (frozen).
+    # Deterministic evaluation — the metric SB3 reports (action = policy mean,
+    # no exploration noise). Built with the same obs-side wrappers as training;
+    # if normalizing, reuse the trained obs statistics (frozen).
     if args.eval_episodes > 0:
         eval_env = make_env(
             args.env_id, 0, False, f"{run_name}-eval", args.gamma,
