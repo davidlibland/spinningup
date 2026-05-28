@@ -1,0 +1,16 @@
+trial,seed,final,rc,elapsed_s,n_reports,report_path
+33,101,1312.7078,0,1566.9,244,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0033_seed_101.jsonl
+79,104,1809.1546,0,2297.5,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0079_seed_104.jsonl
+79,102,1484.7661,0,2297.7,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0079_seed_102.jsonl
+79,105,1881.3074,0,2297.7,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0079_seed_105.jsonl
+79,101,1463.5883,0,2297.7,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0079_seed_101.jsonl
+79,103,1478.6995,0,2298.2,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0079_seed_103.jsonl
+27,101,1585.1749,0,420.5,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0027_seed_101.jsonl
+27,102,1443.8777,0,420.5,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0027_seed_102.jsonl
+33,102,1455.9393,0,1450.2,244,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0033_seed_102.jsonl
+27,103,1399.7092,0,417.9,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0027_seed_103.jsonl
+27,104,1498.6215,0,417.5,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0027_seed_104.jsonl
+27,105,1399.6425,0,328.1,241,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0027_seed_105.jsonl
+33,104,1447.0872,0,1152.7,244,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0033_seed_104.jsonl
+33,103,2861.3329,0,1154.0,244,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0033_seed_103.jsonl
+33,105,1555.5273,0,1154.2,244,/home/dlibland/dev/spinningup/experiments/halfcheetah/reeval_results/jsonl/trial_0033_seed_105.jsonl
